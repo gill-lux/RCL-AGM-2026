@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>AGM Voting</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui,-apple-system,sans-serif; background: #f9fafb; color: #111; min-height: 100vh; }
+#app { max-width: 600px; margin: 0 auto; padding: 16px 16px 60px; }
+.btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; font-family: inherit; }
+.btn-primary { background: #1d4ed8; color: #fff; }
+.btn-danger  { background: #dc2626; color: #fff; }
+.btn-secondary { background: #e5e7eb; color: #111; }
+.btn-success { background: #16a34a; color: #fff; }
+.btn-dark    { background: #374151; color: #fff; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.input { padding: 8px 10px; border-radius: 6px; border: 1px solid #d1d5db; font-size: 14px; width: 100%; font-family: inherit; }
+.card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.1); margin-bottom: 12px; }
+.label { font-size: 13px; color: #6b7280; margin-bottom: 4px; display: block; margin-top: 8px; }
+.label:first-child { margin-top: 0; }
+h2 { font-size: 18px; font-weight: 700; margin-bottom: 14px; }
+h3 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+.err { color: #dc2626; font-size: 13px; margin-top: 6px; }
+.ok  { color: #16a34a;  font-size: 13px; margin-top: 6px; }
+.tabs { display: flex; gap: 3px; background: #f3f4f6; padding: 4px; border-radius: 8px; margin-bottom: 20px; }
+.tab { flex:1; padding:7px 0; font-size:13px; border:none; background:transparent; color:#6b7280; cursor:pointer; border-radius:6px; font-family:inherit; }
+.tab.active { background:#fff; color:#111; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+.bar-bg  { background:#f3f4f6; border-radius:6px; height:14px; overflow:hidden; margin-top:3px; }
+.bar     { height:100%; border-radius:6px; transition:width .4s ease; }
+.codelist { max-height:300px; overflow-y:auto; }
+.coderow { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #f3f4f6; font-size:13px; font-family:monospace; }
+.tag-u  { color:#dc2626; font-family:system-ui; font-weight:500; }
+.tag-n  { color:#16a34a; font-family:system-ui; font-weight:500; }
+.row    { display:flex; gap:8px; align-items:center; }
+.wrap   { display:flex; flex-wrap:wrap; gap:8px; }
+.between { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.center { text-align:center; }
+.spin   { display:flex; align-items:center; justify-content:center; height:100vh; color:#6b7280; }
+.badge  { background:#f0f9ff; color:#0369a1; padding:4px 10px; border-radius:20px; font-size:13px; font-weight:600; }
+.hint   { font-size:12px; color:#9ca3af; text-align:center; margin-top:8px; }
+</style>
+</head>
+<body>
+<div id="app"><div class="spin">Loading…</div></div>
+<script>
+// ── Config ───────────────────────────────────────────────────────────────────
+const KEY  = '$2a$10$Kw3Ng3TJYJa.0GcaSx2dm.xXt.RLa3GajAkONur921c2QJKVcYftO';
+const BINS = {
+  agenda : '69f8f2a0aaba8821976edd92',
+  codes  : '69f8f2ab36566621a824f0bd',
+  pin    : '69f8f2b8aaba8821976ede56'
+};
+
+// ── State ────────────────────────────────────────────────────────────────────
+let agenda = [], codes = {}, pin = '0000';
+let adminAuthed = false, adminTab = 'agenda', refreshTimer = null;
+let agSt = { adding:false, newItem:null, editId:null, editItem:null, delConfirm:null };
+let cdSt = { genCount:'10', copied:false, clearConfirm:false };
+let stSt = { newPin:'', confirmPin:'', pinMsg:null, resetConfirm:false, resetMsg:'' };
+
+// ── JSONBin ──────────────────────────────────────────────────────────────────
+async function getbin(name) {
+  const r = await fetch(`https://api.jsonbin.io/v3/b/${BINS[name]}/latest`, {
+    headers:{'X-Master-Key':KEY}
+  });
+  return (await r.json()).record;
+}
+async function setbin(name, val) {
+  await fetch(`https://api.jsonbin.io/v3/b/${BINS[name]}`, {
+    method:'PUT',
+    headers:{'X-Master-Key':KEY,'Content-Type':'application/json','X-Bin-Versioning':'false'},
+    body:JSON.stringify(val)
+  });
+}
+function isInit(v){ return v && typeof v==='object' && !Array.isArray(v) && v.init===true; }
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+async function boot() {
+  try {
+    const [a,c,p] = await Promise.all([getbin('agenda'),getbin('codes'),getbin('pin')]);
+    agenda = Array.isArray(a) ? a : [];
+    codes  = (c && !isInit(c) && typeof c==='object') ? c : {};
+    pin    = (typeof p==='string' && !isInit(p)) ? p : '0000';
+  } catch(e){ agenda=[]; codes={}; pin='0000'; }
+  go('home');
+}
+
+// ── Router ───────────────────────────────────────────────────────────────────
+function stopTimer(){ if(refreshTimer){ clearInterval(refreshTimer); refreshTimer=null; } }
+function go(screen){ stopTimer(); document.getElementById('app').innerHTML=''; screens[screen](); }
+const screens = { home:showHome, vote:showVote, results:()=>showResults(true), admin:showAdmin };
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const CHARS='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+function genCode(){ let s=''; for(let i=0;i<8;i++) s+=CHARS[Math.floor(Math.random()*36)]; return s; }
+
+function calcResults(){
+  const R={};
+  for(const item of agenda){
+    R[item.id]={};
+    for(const o of (item.type==='yesno'?['Yes','No']:item.options)) R[item.id][o]=0;
+  }
+  for(const [,d] of Object.entries(codes)){
+    if(!d.used||!d.votes) continue;
+    for(const item of agenda){
+      const v=d.votes[item.id];
+      if(v!==undefined && R[item.id] && R[item.id][v]!==undefined) R[item.id][v]++;
+    }
+  }
+  return R;
+}
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function resultsHtml(){
+  const R=calcResults(), BAR=['#1d4ed8','#16a34a','#d97706','#7c3aed','#db2777'];
+  if(!agenda.length) return '<p style="color:#9ca3af">No agenda items configured.</p>';
+  return agenda.map((item,i)=>{
+    const opts=item.type==='yesno'?['Yes','No']:item.options;
+    const C=R[item.id]||{};
+    const tot=opts.reduce((a,o)=>a+(C[o]||0),0);
+    return `<div class="card"><p style="font-weight:600;margin-bottom:12px">${i+1}. ${esc(item.title)}</p>
+      ${opts.map((o,oi)=>{ const n=C[o]||0,p=tot>0?(n/tot*100):0;
+        return `<div style="margin-bottom:10px">
+          <div class="between" style="font-size:13px;margin-bottom:3px">
+            <span style="font-weight:500">${esc(o)}</span>
+            <span style="color:#6b7280">${n} vote${n!==1?'s':''} &nbsp;<strong>${p.toFixed(0)}%</strong></span>
+          </div>
+          <div class="bar-bg"><div class="bar" style="background:${BAR[oi%BAR.length]};width:${p}%"></div></div>
+        </div>`; }).join('')}
+      ${tot===0?'<p style="color:#9ca3af;font-size:12px;margin-top:4px">No votes yet.</p>':''}
+    </div>`;
+  }).join('');
+}
+
+// ── Home ─────────────────────────────────────────────────────────────────────
+function showHome(){
+  const app=document.getElementById('app');
+  app.innerHTML=`<div class="center" style="padding-top:60px">
+    <div style="font-size:48px;margin-bottom:8px">🗳️</div>
+    <h1 style="font-size:28px;font-weight:800;margin-bottom:6px">AGM Voting</h1>
+    <p style="color:#6b7280;margin-bottom:40px">Annual General Meeting</p>
+    <div style="display:flex;flex-direction:column;gap:12px;max-width:300px;margin:0 auto">
+      <button class="btn btn-primary" style="padding:14px 24px;font-size:16px" id="bv">🗳️ Cast My Vote</button>
+      <button class="btn btn-secondary" style="padding:14px 24px;font-size:16px" id="br">📊 View Results</button>
+      <button class="btn btn-dark" style="padding:14px 24px;font-size:16px" id="ba">⚙️ Admin</button>
+    </div></div>`;
+  document.getElementById('bv').onclick=()=>go('vote');
+  document.getElementById('br').onclick=()=>go('results');
+  document.getElementById('ba').onclick=()=>go('admin');
+}
+
+// ── Vote ─────────────────────────────────────────────────────────────────────
+function showVote(){ showVoteEnter(); }
+
+function showVoteEnter(){
+  const app=document.getElementById('app');
+  app.innerHTML=`
+    <button class="btn btn-secondary" id="bb" style="margin-bottom:24px">← Back</button>
+    <div class="card">
+      <h2>Enter Your Voting Code</h2>
+      <span class="label">8-character code</span>
+      <input class="input" id="ci" maxlength="8" placeholder="XXXXXXXX" autocomplete="off" autocapitalize="characters"
+        style="letter-spacing:6px;text-transform:uppercase;font-family:monospace;font-size:20px;text-align:center">
+      <div id="ce" class="err" style="display:none"></div>
+      <button class="btn btn-primary" id="bcont" style="width:100%;margin-top:14px">Continue →</button>
+    </div>
+    ${!agenda.length?'<p style="color:#9ca3af;font-size:13px;text-align:center">No agenda items have been configured yet.</p>':''}`;
+  const inp=document.getElementById('ci');
+  inp.focus();
+  inp.oninput=()=>{ inp.value=inp.value.toUpperCase(); document.getElementById('ce').style.display='none'; };
+  document.getElementById('bb').onclick=()=>go('home');
+  const go2=()=>{
+    const code=inp.value.trim().toUpperCase();
+    const errEl=document.getElementById('ce');
+    if(code.length!==8){ errEl.textContent='Code must be 8 characters.'; errEl.style.display='block'; return; }
+    if(!codes[code]){ errEl.textContent='Code not found.'; errEl.style.display='block'; return; }
+    if(codes[code].used){ errEl.textContent='This code has already been used.'; errEl.style.display='block'; return; }
+    showVoteItems(code);
+  };
+  document.getElementById('bcont').onclick=go2;
+  inp.onkeydown=e=>{ if(e.key==='Enter') go2(); };
+}
+
+function showVoteItems(code){
+  const votes={};
+  for(const item of agenda) votes[item.id]=null;
+  const app=document.getElementById('app');
+
+  function render(){
+    const allDone=agenda.length>0&&agenda.every(a=>votes[a.id]);
+    app.innerHTML=`
+      <p style="color:#6b7280;font-size:13px;margin-bottom:16px">Code: <strong style="font-family:monospace">${code}</strong></p>
+      <h2>Cast Your Votes</h2>
+      <p style="font-size:13px;color:#6b7280;margin:-8px 0 16px">Please vote on all ${agenda.length} item${agenda.length!==1?'s':''} below.</p>
+      ${agenda.map((item,i)=>{
+        const opts=item.type==='yesno'?['Yes','No']:item.options;
+        return `<div class="card" style="border:1px solid ${votes[item.id]?'#bbf7d0':'#e5e7eb'}">
+          <p style="font-weight:600;margin-bottom:10px">${i+1}. ${esc(item.title)}</p>
+          <div class="wrap">
+            ${opts.map(o=>`<button class="btn ${votes[item.id]===o?'btn-primary':'btn-secondary'} vopt"
+              data-id="${esc(item.id)}" data-opt="${esc(o)}"
+              style="${item.type==='yesno'?'flex:1':''}">
+              ${votes[item.id]===o?'✓ ':''}${esc(o)}</button>`).join('')}
+          </div></div>`;
+      }).join('')}
+      <button class="btn btn-primary" id="bsub" style="width:100%;padding:14px;font-size:16px;${allDone?'':'opacity:.45'}" ${allDone?'':'disabled'}>Submit All Votes</button>
+      ${!allDone?'<p class="hint">Please answer all items to continue.</p>':''}`;
+
+    document.querySelectorAll('.vopt').forEach(btn=>{
+      btn.onclick=()=>{ votes[btn.dataset.id]=btn.dataset.opt; render(); };
+    });
+    const sub=document.getElementById('bsub');
+    if(sub) sub.onclick=async()=>{
+      sub.disabled=true; sub.textContent='Submitting…';
+      // re-fetch to reduce race risk
+      try{ const lc=await getbin('codes'); if(lc&&!isInit(lc)) codes=lc; }catch(e){}
+      if(codes[code]&&codes[code].used){ showVoteEnter(); return; }
+      codes={...codes,[code]:{used:true,votes}};
+      await setbin('codes',codes);
+      showVoteDone();
+    };
+  }
+  render();
+}
+
+function showVoteDone(){
+  document.getElementById('app').innerHTML=`<div class="center" style="padding-top:80px">
+    <div style="font-size:64px;margin-bottom:16px">✅</div>
+    <h2 style="font-size:22px">Vote Submitted</h2>
+    <p style="color:#6b7280;margin:8px 0 28px">Thank you — your votes have been recorded.</p>
+    <button class="btn btn-secondary" id="bh">← Back to Home</button></div>`;
+  document.getElementById('bh').onclick=()=>go('home');
+}
+
+// ── Results ──────────────────────────────────────────────────────────────────
+function showResults(showBack){
+  const app=document.getElementById('app');
+  const used=Object.values(codes).filter(c=>c.used).length;
+  if(!document.getElementById('res-items')){
+    app.innerHTML=`
+      ${showBack?'<button class="btn btn-secondary" id="bb" style="margin-bottom:20px">← Back</button>':''}
+      <div class="between" style="margin-bottom:14px">
+        <h2 style="margin:0">Live Results</h2>
+        <span class="badge" id="vcnt">${used} vote${used!==1?'s':''} cast</span>
+      </div>
+      <div id="res-items">${resultsHtml()}</div>
+      <p class="hint">Auto-refreshes every 10 seconds</p>`;
+    if(showBack) document.getElementById('bb').onclick=()=>go('home');
+  } else {
+    const el=document.getElementById('res-items');
+    if(el) el.innerHTML=resultsHtml();
+    const vc=document.getElementById('vcnt');
+    if(vc) vc.textContent=`${used} vote${used!==1?'s':''} cast`;
+  }
+  stopTimer();
+  refreshTimer=setInterval(async()=>{
+    try{
+      const [a,c]=await Promise.all([getbin('agenda'),getbin('codes')]);
+      if(Array.isArray(a)) agenda=a;
+      if(c&&!isInit(c)) codes=c;
+      const el=document.getElementById('res-items');
+      if(!el){ stopTimer(); return; }
+      el.innerHTML=resultsHtml();
+      const vc=document.getElementById('vcnt');
+      const u=Object.values(codes).filter(x=>x.used).length;
+      if(vc) vc.textContent=`${u} vote${u!==1?'s':''} cast`;
+    }catch(e){}
+  },10000);
+}
+
+// ── Admin shell ───────────────────────────────────────────────────────────────
+function showAdmin(){ adminAuthed ? showAdminPanel() : showAdminLogin(); }
+
+function showAdminLogin(){
+  document.getElementById('app').innerHTML=`
+    <button class="btn btn-secondary" id="bb" style="margin-bottom:24px">← Back</button>
+    <div class="card">
+      <h2>Admin Access</h2>
+      <span class="label">PIN</span>
+      <input class="input" type="password" id="pi" maxlength="12" placeholder="••••"
+        style="letter-spacing:8px;font-family:monospace;text-align:center;font-size:20px">
+      <div id="pe" class="err" style="display:none"></div>
+      <button class="btn btn-primary" id="bu" style="width:100%;margin-top:14px">Unlock</button>
+    </div>`;
+  document.getElementById('bb').onclick=()=>go('home');
+  const check=()=>{
+    if(document.getElementById('pi').value===pin){ adminAuthed=true; showAdminPanel(); }
+    else{ document.getElementById('pe').textContent='Incorrect PIN.'; document.getElementById('pe').style.display='block'; }
+  };
+  document.getElementById('bu').onclick=check;
+  document.getElementById('pi').onkeydown=e=>{ if(e.key==='Enter') check(); };
+  document.getElementById('pi').focus();
+}
+
+function showAdminPanel(){
+  stopTimer();
+  document.getElementById('app').innerHTML=`
+    <div class="between" style="margin-bottom:16px">
+      <button class="btn btn-secondary" id="bh">← Home</button>
+      <span style="font-size:13px;color:#6b7280;font-weight:600">⚙️ Admin</span>
+    </div>
+    <div class="tabs">
+      <button class="tab${adminTab==='agenda'?' active':''}" data-t="agenda">Agenda</button>
+      <button class="tab${adminTab==='codes'?' active':''}" data-t="codes">Codes</button>
+      <button class="tab${adminTab==='results'?' active':''}" data-t="results">Results</button>
+      <button class="tab${adminTab==='settings'?' active':''}" data-t="settings">Settings</button>
+    </div>
+    <div id="ac"></div>`;
+  document.getElementById('bh').onclick=()=>{ stopTimer(); go('home'); };
+  document.querySelectorAll('.tab').forEach(t=>{ t.onclick=()=>{ adminTab=t.dataset.t; showAdminPanel(); }; });
+  if(adminTab==='agenda')   showAgendaTab();
+  else if(adminTab==='codes')    showCodesTab();
+  else if(adminTab==='results')  showAdminResults();
+  else if(adminTab==='settings') showSettingsTab();
+}
+
+// ── Agenda tab ────────────────────────────────────────────────────────────────
+function itemFormHtml(pfx, item){
+  if(!item) return '';
+  return `
+    <span class="label">Motion / Question</span>
+    <input class="input ititle" data-p="${pfx}" value="${esc(item.title)}" placeholder="Enter motion text…">
+    <span class="label" style="margin-top:10px">Voting type</span>
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn ${item.type==='yesno'?'btn-primary':'btn-secondary'} itype" data-p="${pfx}" data-t="yesno" style="flex:1">Yes / No</button>
+      <button class="btn ${item.type==='choice'?'btn-primary':'btn-secondary'} itype" data-p="${pfx}" data-t="choice" style="flex:1">Multiple Choice</button>
+    </div>
+    ${item.type==='choice'?`
+      <span class="label">Options (min 2)</span>
+      ${item.options.map((o,i)=>`
+        <div class="row" style="margin-bottom:6px">
+          <input class="input iopt" data-p="${pfx}" data-i="${i}" value="${esc(o)}" placeholder="Option ${i+1}" style="flex:1">
+          ${item.options.length>2?`<button class="btn btn-danger iopdel" data-p="${pfx}" data-i="${i}" style="padding:6px 12px">×</button>`:''}
+        </div>`).join('')}
+      <button class="btn btn-secondary iopadd" data-p="${pfx}" style="font-size:13px;margin-top:2px">+ Add Option</button>
+    `:''}`;
+}
+
+function bindForm(pfx, getItem, setItem){
+  document.querySelectorAll(`.ititle[data-p="${pfx}"]`).forEach(el=>{
+    el.oninput=()=>setItem({...getItem(),title:el.value});
+  });
+  document.querySelectorAll(`.itype[data-p="${pfx}"]`).forEach(btn=>{
+    btn.onclick=()=>{ const it=getItem(); setItem({...it,type:btn.dataset.t,options:it.options.length?it.options:['','']}); };
+  });
+  document.querySelectorAll(`.iopt[data-p="${pfx}"]`).forEach(el=>{
+    el.oninput=()=>{ const it=getItem(),opts=[...it.options]; opts[+el.dataset.i]=el.value; setItem({...it,options:opts}); };
+  });
+  document.querySelectorAll(`.iopdel[data-p="${pfx}"]`).forEach(btn=>{
+    btn.onclick=()=>{ const it=getItem(); setItem({...it,options:it.options.filter((_,i)=>i!==+btn.dataset.i)}); };
+  });
+  document.querySelectorAll(`.iopadd[data-p="${pfx}"]`).forEach(btn=>{
+    btn.onclick=()=>{ const it=getItem(); setItem({...it,options:[...it.options,'']}); };
+  });
+}
+
+function showAgendaTab(){ if(!agSt.newItem) agSt.newItem={title:'',type:'yesno',options:['','']}; renderAgendaTab(); }
+
+function renderAgendaTab(){
+  const c=document.getElementById('ac'), s=agSt;
+  c.innerHTML=`
+    <div class="between" style="margin-bottom:14px">
+      <h2 style="margin:0">Agenda Items</h2>
+      ${!s.adding?'<button class="btn btn-primary" id="badd">+ Add Item</button>':''}
+    </div>
+    ${s.adding?`<div class="card" style="border:2px solid #1d4ed8"><h3>New Agenda Item</h3>
+      ${itemFormHtml('new',s.newItem)}
+      <div class="row" style="margin-top:14px">
+        <button class="btn btn-primary" id="bsn">Save</button>
+        <button class="btn btn-secondary" id="bcn">Cancel</button>
+      </div></div>`:''}
+    ${!agenda.length&&!s.adding?'<p style="color:#9ca3af;text-align:center;padding-top:20px">No agenda items yet.</p>':''}
+    ${agenda.map((item,i)=>`
+      <div class="card">
+        ${s.editId===item.id?`
+          ${itemFormHtml('edit',s.editItem)}
+          <div class="row" style="margin-top:14px">
+            <button class="btn btn-primary" id="bse">Save</button>
+            <button class="btn btn-secondary" id="bce">Cancel</button>
+          </div>
+        `:`
+          <div class="between">
+            <div style="flex:1">
+              <p style="margin:0;font-weight:600">${i+1}. ${esc(item.title)}</p>
+              <p style="margin:4px 0 0;font-size:12px;color:#9ca3af">
+                ${item.type==='yesno'?'Yes / No':'Multiple choice: '+item.options.map(esc).join(' · ')}
+              </p>
+            </div>
+            <div class="row" style="flex-shrink:0">
+              <button class="btn btn-secondary iedit" data-id="${item.id}" style="padding:4px 10px;font-size:12px">Edit</button>
+              ${s.delConfirm===item.id?`
+                <span style="font-size:12px;line-height:30px">Delete?</span>
+                <button class="btn btn-danger idely" data-id="${item.id}" style="padding:4px 8px;font-size:12px">Yes</button>
+                <button class="btn btn-secondary ideln" style="padding:4px 8px;font-size:12px">No</button>
+              `:`<button class="btn btn-danger idel" data-id="${item.id}" style="padding:4px 10px;font-size:12px">Delete</button>`}
+            </div>
+          </div>`}
+      </div>`).join('')}`;
+
+  bindForm('new',()=>agSt.newItem,v=>{agSt.newItem=v;renderAgendaTab();});
+  if(agSt.editId) bindForm('edit',()=>agSt.editItem,v=>{agSt.editItem=v;renderAgendaTab();});
+
+  const badd=document.getElementById('badd');
+  if(badd) badd.onclick=()=>{ agSt.adding=true; agSt.newItem={title:'',type:'yesno',options:['','']}; renderAgendaTab(); };
+
+  const bsn=document.getElementById('bsn');
+  if(bsn) bsn.onclick=async()=>{
+    const it=agSt.newItem;
+    if(!it.title.trim()) return;
+    if(it.type==='choice'&&it.options.filter(o=>o.trim()).length<2) return;
+    agenda=[...agenda,{id:Date.now().toString(),title:it.title.trim(),type:it.type,options:it.type==='choice'?it.options.filter(o=>o.trim()):[]}];
+    await setbin('agenda',agenda);
+    agSt.adding=false; agSt.newItem=null; renderAgendaTab();
+  };
+  const bcn=document.getElementById('bcn');
+  if(bcn) bcn.onclick=()=>{ agSt.adding=false; renderAgendaTab(); };
+
+  const bse=document.getElementById('bse');
+  if(bse) bse.onclick=async()=>{
+    const it=agSt.editItem;
+    if(!it.title.trim()) return;
+    if(it.type==='choice'&&it.options.filter(o=>o.trim()).length<2) return;
+    const updated={...it,title:it.title.trim(),options:it.type==='choice'?it.options.filter(o=>o.trim()):[]};
+    agenda=agenda.map(a=>a.id===agSt.editId?updated:a);
+    await setbin('agenda',agenda);
+    agSt.editId=null; agSt.editItem=null; renderAgendaTab();
+  };
+  const bce=document.getElementById('bce');
+  if(bce) bce.onclick=()=>{ agSt.editId=null; agSt.editItem=null; renderAgendaTab(); };
+
+  document.querySelectorAll('.iedit').forEach(btn=>{
+    btn.onclick=()=>{ const it=agenda.find(a=>a.id===btn.dataset.id); agSt.editId=it.id; agSt.editItem={...it,options:it.options.length?[...it.options]:['','']}; renderAgendaTab(); };
+  });
+  document.querySelectorAll('.idel').forEach(btn=>{
+    btn.onclick=()=>{ agSt.delConfirm=btn.dataset.id; renderAgendaTab(); };
+  });
+  document.querySelectorAll('.idely').forEach(btn=>{
+    btn.onclick=async()=>{
+      const id=btn.dataset.id;
+      agenda=agenda.filter(a=>a.id!==id);
+      const nc={};
+      for(const [k,v] of Object.entries(codes)){ const nv={...(v.votes||{})}; delete nv[id]; nc[k]={...v,votes:nv}; }
+      codes=nc;
+      await Promise.all([setbin('agenda',agenda),setbin('codes',codes)]);
+      agSt.delConfirm=null; renderAgendaTab();
+    };
+  });
+  document.querySelectorAll('.ideln').forEach(btn=>{ btn.onclick=()=>{ agSt.delConfirm=null; renderAgendaTab(); }; });
+}
+
+// ── Codes tab ─────────────────────────────────────────────────────────────────
+function showCodesTab(){ renderCodesTab(); }
+
+function renderCodesTab(){
+  const c=document.getElementById('ac');
+  const all=Object.entries(codes);
+  const used=all.filter(([,v])=>v.used).length, unused=all.filter(([,v])=>!v.used).length, total=all.length;
+  const s=cdSt;
+  c.innerHTML=`
+    <h2>Voting Codes</h2>
+    <div class="card" style="background:#f0f9ff;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-around;text-align:center">
+        <div><p style="margin:0;font-size:30px;font-weight:800">${total}</p><p style="margin:2px 0 0;font-size:12px;color:#6b7280">Total</p></div>
+        <div><p style="margin:0;font-size:30px;font-weight:800;color:#16a34a">${unused}</p><p style="margin:2px 0 0;font-size:12px;color:#6b7280">Unused</p></div>
+        <div><p style="margin:0;font-size:30px;font-weight:800;color:#dc2626">${used}</p><p style="margin:2px 0 0;font-size:12px;color:#6b7280">Used</p></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Generate Codes</h3>
+      <div class="row">
+        <input class="input" id="gcnt" type="number" min="1" max="1000" value="${s.genCount}" style="width:90px">
+        <button class="btn btn-primary" id="bgen">Generate</button>
+      </div>
+    </div>
+    <div class="row" style="margin-bottom:14px">
+      <button class="btn ${s.copied?'btn-success':'btn-secondary'}" id="bcopy" style="flex:1" ${unused===0?'disabled':''}>${s.copied?'✓ Copied!':'Copy Unused Codes'}</button>
+      ${s.clearConfirm?`
+        <div class="row" style="flex:1;justify-content:center;background:#fff7ed;border-radius:6px;padding:4px 10px;font-size:13px">
+          Delete ${unused}?
+          <button class="btn btn-danger" id="bcy" style="padding:5px 10px;font-size:12px">Yes</button>
+          <button class="btn btn-secondary" id="bcn2" style="padding:5px 10px;font-size:12px">No</button>
+        </div>`:`<button class="btn btn-danger" id="bclr" style="flex:1" ${unused===0?'disabled':''}>Clear Unused</button>`}
+    </div>
+    <div class="card">
+      <h3>All Codes</h3>
+      <div class="codelist">
+        ${!all.length?'<p style="color:#9ca3af;margin:0;font-size:13px">No codes yet.</p>':
+          all.sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>
+            `<div class="coderow"><span>${k}</span><span class="${v.used?'tag-u':'tag-n'}">${v.used?'Used':'Unused'}</span></div>`
+          ).join('')}
+      </div>
+    </div>`;
+
+  document.getElementById('gcnt').oninput=e=>{ cdSt.genCount=e.target.value; };
+  document.getElementById('bgen').onclick=async()=>{
+    const n=Math.min(Math.max(parseInt(cdSt.genCount)||10,1),1000);
+    const nc={...codes};
+    for(let i=0;i<n;i++){ let c2; do{c2=genCode();}while(nc[c2]); nc[c2]={used:false}; }
+    codes=nc; await setbin('codes',codes); renderCodesTab();
+  };
+  document.getElementById('bcopy').onclick=()=>{
+    const list=Object.entries(codes).filter(([,v])=>!v.used).map(([k])=>k).join('\n');
+    navigator.clipboard.writeText(list).then(()=>{ cdSt.copied=true; renderCodesTab(); setTimeout(()=>{ cdSt.copied=false; renderCodesTab(); },2500); });
+  };
+  const bclr=document.getElementById('bclr');
+  if(bclr) bclr.onclick=()=>{ cdSt.clearConfirm=true; renderCodesTab(); };
+  const bcy=document.getElementById('bcy');
+  if(bcy) bcy.onclick=async()=>{
+    const nc={}; for(const [k,v] of Object.entries(codes)){ if(v.used) nc[k]=v; }
+    codes=nc; await setbin('codes',codes); cdSt.clearConfirm=false; renderCodesTab();
+  };
+  const bcn2=document.getElementById('bcn2');
+  if(bcn2) bcn2.onclick=()=>{ cdSt.clearConfirm=false; renderCodesTab(); };
+}
+
+// ── Admin Results ─────────────────────────────────────────────────────────────
+function showAdminResults(){
+  const c=document.getElementById('ac');
+  const used=Object.values(codes).filter(x=>x.used).length;
+  c.innerHTML=`
+    <div class="between" style="margin-bottom:14px">
+      <h2 style="margin:0">Results</h2>
+      <span class="badge" id="vcnt">${used} vote${used!==1?'s':''} cast</span>
+    </div>
+    <div id="res-items">${resultsHtml()}</div>
+    <p class="hint">Auto-refreshes every 10 seconds</p>`;
+  stopTimer();
+  refreshTimer=setInterval(async()=>{
+    try{
+      const [a,cc]=await Promise.all([getbin('agenda'),getbin('codes')]);
+      if(Array.isArray(a)) agenda=a;
+      if(cc&&!isInit(cc)) codes=cc;
+      const el=document.getElementById('res-items');
+      if(!el||adminTab!=='results'){ stopTimer(); return; }
+      el.innerHTML=resultsHtml();
+      const vc=document.getElementById('vcnt');
+      const u=Object.values(codes).filter(x=>x.used).length;
+      if(vc) vc.textContent=`${u} vote${u!==1?'s':''} cast`;
+    }catch(e){}
+  },10000);
+}
+
+// ── Settings tab ──────────────────────────────────────────────────────────────
+function showSettingsTab(){ renderSettingsTab(); }
+
+function renderSettingsTab(){
+  const c=document.getElementById('ac'), s=stSt;
+  c.innerHTML=`
+    <h2>Settings</h2>
+    <div class="card">
+      <h3>Change Admin PIN</h3>
+      <span class="label">New PIN</span>
+      <input class="input" id="np" type="password" maxlength="12" value="${esc(s.newPin)}"
+        style="letter-spacing:6px;font-family:monospace;text-align:center;margin-bottom:10px">
+      <span class="label">Confirm New PIN</span>
+      <input class="input" id="cp" type="password" maxlength="12" value="${esc(s.confirmPin)}"
+        style="letter-spacing:6px;font-family:monospace;text-align:center;margin-bottom:12px">
+      ${s.pinMsg?`<p class="${s.pinMsg.ok?'ok':'err'}" style="margin-bottom:10px">${esc(s.pinMsg.text)}</p>`:''}
+      <button class="btn btn-primary" id="bcp">Update PIN</button>
+    </div>
+    <div class="card">
+      <h3>Reset All Votes</h3>
+      <p style="color:#6b7280;font-size:13px;margin-bottom:12px">Clears all recorded votes and marks all codes as unused. Agenda and codes are preserved.</p>
+      ${s.resetMsg?`<p class="ok" style="margin-bottom:10px">${esc(s.resetMsg)}</p>`:''}
+      ${s.resetConfirm?`<div class="row">
+        <span style="font-size:13px">Reset all votes?</span>
+        <button class="btn btn-danger" id="bry">Yes, Reset</button>
+        <button class="btn btn-secondary" id="brn">Cancel</button>
+      </div>`:`<button class="btn btn-danger" id="brst">Reset All Votes</button>`}
+    </div>`;
+
+  document.getElementById('np').oninput=e=>{ stSt.newPin=e.target.value; stSt.pinMsg=null; };
+  document.getElementById('cp').oninput=e=>{ stSt.confirmPin=e.target.value; stSt.pinMsg=null; };
+  document.getElementById('bcp').onclick=async()=>{
+    const np=stSt.newPin, cp2=stSt.confirmPin;
+    if(np.length<4){ stSt.pinMsg={ok:false,text:'PIN must be at least 4 characters.'}; renderSettingsTab(); return; }
+    if(np!==cp2){ stSt.pinMsg={ok:false,text:'PINs do not match.'}; renderSettingsTab(); return; }
+    pin=np; await setbin('pin',pin);
+    stSt.newPin=''; stSt.confirmPin=''; stSt.pinMsg={ok:true,text:'PIN updated successfully.'}; renderSettingsTab();
+  };
+  const brst=document.getElementById('brst');
+  if(brst) brst.onclick=()=>{ stSt.resetConfirm=true; stSt.resetMsg=''; renderSettingsTab(); };
+  const bry=document.getElementById('bry');
+  if(bry) bry.onclick=async()=>{
+    const nc={}; for(const [k] of Object.entries(codes)) nc[k]={used:false};
+    codes=nc; await setbin('codes',codes);
+    stSt.resetConfirm=false; stSt.resetMsg='All votes reset. Codes remain active.'; renderSettingsTab();
+  };
+  const brn=document.getElementById('brn');
+  if(brn) brn.onclick=()=>{ stSt.resetConfirm=false; renderSettingsTab(); };
+}
+
+// ── Go ────────────────────────────────────────────────────────────────────────
+boot();
+</script>
+</body>
+</html>
