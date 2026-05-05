@@ -81,7 +81,7 @@ async function boot() {
     const [a,c,p] = await Promise.all([getbin('agenda'),getbin('codes'),getbin('pin')]);
     agenda = Array.isArray(a) ? a : [];
     codes  = (c && !isInit(c) && typeof c==='object') ? c : {};
-    pin    = (typeof p==='string' && !isInit(p)) ? p : '0000';
+    pin    = (p && !isInit(p) && p.value) ? p.value : '0000';
   } catch(e){ agenda=[]; codes={}; pin='0000'; }
   go('home');
 }
@@ -577,7 +577,7 @@ function renderSettingsTab(){
     const np=stSt.newPin, cp2=stSt.confirmPin;
     if(np.length<4){ stSt.pinMsg={ok:false,text:'PIN must be at least 4 characters.'}; renderSettingsTab(); return; }
     if(np!==cp2){ stSt.pinMsg={ok:false,text:'PINs do not match.'}; renderSettingsTab(); return; }
-    pin=np; await setbin('pin',pin);
+    pin=np; await setbin('pin',{value:pin});
     stSt.newPin=''; stSt.confirmPin=''; stSt.pinMsg={ok:true,text:'PIN updated successfully.'}; renderSettingsTab();
   };
   const brst=document.getElementById('brst');
